@@ -1,0 +1,19 @@
+
+/*********************************************************************************************************************/
+/* Procedure: [dbo].[SP_TAXES_CALCULATE_TA] */
+CREATE OR ALTER PROCEDURE [dbo].[SP_TAXES_CALCULATE_TA]
+	@ROW_ID INT,
+	@REGISTER SYSNAME,
+	@RESULT VARCHAR(255) = NULL OUT,
+	@UPDATE_REGISTER BIT = 1,
+	@DATE DATE = NULL,
+	@TRACE BIT = 0
+AS
+	IF (@REGISTER = 'PREV_COMMON_TA')
+		EXEC [SP_TAXES_CALCULATE_PREV_COMMON_TA] @ROW_ID, @RESULT OUT, @UPDATE_REGISTER, @DATE, @TRACE
+
+	--ELSE IF (@REGISTER = 'VAL_PREV_TA')
+	--	EXEC [SP_TAXES_CALCULATE_VAL_PREV_TA] @ROW_ID, @RESULT OUT
+	ELSE
+		SET @RESULT = NULL
+GO
