@@ -1,7 +1,16 @@
+/***************************************************************************************************************/
+-- Име          : Янко Янков
+-- Дата и час   : 2020/06/07
+-- Задача       : Support Task 282601
+-- Класификация : Test Automation - 
+-- Описание     : Процедура за изчисляване сумата на комисионната по код на такса
+-- Параметри    : Няма
+/***************************************************************************************************************/
 
 /*********************************************************************************************************************/
 /* Procedure: [dbo].[SP_TAXES_CALCULATE_PREV_COMMON_TA] -> ver.1.0.1 2022/05/31 */
-/* 														-> ver.1.0.2 2022/06/07 */
+/* ver.1.0.2 2022/06/07 - Върната сума е във валутата на таксата */
+/* ver.1.0.3 2022/06/08 - При възнукване на некоректна ситуация добавяме запис в SYS_LOG_PROC */
 CREATE OR ALTER PROCEDURE [dbo].[SP_TAXES_CALCULATE_PREV_COMMON_TA]
 (
 	@ROW_ID INT
@@ -31,6 +40,7 @@ BEGIN
 	DECLARE @PREF_CODE	INT = -1
 	DECLARE @UI_SUM		FLOAT = 0
 	DECLARE @TA_TYPE	VARCHAR(50)
+	DECLARE @Msg 		nvarchar(2000) = N'',@Sql nvarchar(2000) = N'';
 
 	SELECT 	@REF_ID		= [REF_ID]
 		, 	@DEAL_TYPE	= [DEAL_TYPE]
@@ -45,6 +55,13 @@ BEGIN
 		,	@TAX_CURRENCY VARCHAR(4)	/* Валута на таксата */
 	;
 	EXEC dbo.[SP_DEALS_GET_DEAL_CURRENCY_CODE] @REF_ID, @DEAL_TYPE, @DEAL_CURRENCY_CODE OUT
+	;
+
+	DECLARE @TypePref varchar(64) = 'Pref'
+		,	@TypeTax  varchar(64) = 'Tax'
+		,	@X_CCY	  varchar(4)  = 'X'
+		,	@CorrTaxServices int = 3 /* eTaxServices (3) - Обслужване на такси */
+	;	
 
 	/* Валута в която ще се вземе таксата, на основната сметка или валутата на сметката за обслужване */
 	DECLARE @COLLECT_CURRENCY_CODE CHAR(3)
@@ -52,7 +69,7 @@ BEGIN
 				WHERE	[REF_ID]		= @REF_ID 
 					AND [TA_TYPE]		= @TA_TYPE 
 					AND [UI_DEAL_TYPE] 	= @DEAL_TYPE 
-					AND [DB_CORR_TYPE]	= 3 /* 3 - Обслужване на такси*/ );
+					AND [DB_CORR_TYPE]	= @CorrTaxServices /* 3 - Обслужване на такси*/ );
 
 	IF (@COLLECT_CURRENCY_CODE IS NULL)
 		SET @COLLECT_CURRENCY_CODE = @DEAL_CURRENCY_CODE
@@ -70,11 +87,11 @@ BEGIN
 		INSERT INTO @TAX_COMMISSIONS_TABLE
 			SELECT [ROW_ID], [COMMISSION_ORDER], [CURRENCY] FROM dbo.[TAXES_INFO_COMMISSION_TA] WITH(NOLOCK)
 			WHERE [TAX_CODE] = @PREF_CODE
-				AND [TYPE] = 'Pref'
+				AND [TYPE] = @TypePref
 				AND [IS_DEFAULT_CURRENCY] = 1
 			ORDER BY [COMMISSION_ORDER]
 
-		IF EXISTS (SELECT * FROM dbo.[TAXES_INFO_TA] WITH(NOLOCK) WHERE [PREF_PLAN_BASE_ON_DAILY_TURNOVER] > 0 AND [CODE] = @PREF_CODE AND [TYPE] = 'Pref')
+		IF EXISTS (SELECT * FROM dbo.[TAXES_INFO_TA] WITH(NOLOCK) WHERE [PREF_PLAN_BASE_ON_DAILY_TURNOVER] > 0 AND [CODE] = @PREF_CODE AND [TYPE] = @TypePref)
 		BEGIN
 
 			SELECT 	@ACCUMULATED_AMOUNT = SUM(CONVERT(FLOAT, REPLACE([A].[UI_SUM], ' ', '')))
@@ -88,11 +105,27 @@ BEGIN
 				AND [A].[PREF_CODE]		= [B].[PREF_CODE]
 				AND @DATE = CAST(A.TEST_STATUS_HIST AS DATE)
 		END
+		ELSE
+		BEGIN
+			select	@Sql = N'SELECT * FROM dbo.[TAXES_INFO_TA] WITH(NOLOCK) WHERE [PREF_PLAN_BASE_ON_DAILY_TURNOVER] > 0 AND [CODE] = @PREF_CODE AND [TYPE] = Pref'
+				,	@Msg = 'Not found preference with ID: '+str(@PREF_CODE,len(@PREF_CODE),0)
+						+', @PREF_CODE: '			+ str(@PREF_CODE,len(@PREF_CODE),0)
+						+', @ROW_ID: '				+ str(@ROW_ID,len(@ROW_ID),0)
+						+', @TAX_CODE: '			+ str(@TAX_CODE ,len(@TAX_CODE),0)						
+						+', @TA_TYPE: '				+ @TA_TYPE
+						+', @UI_SUM: '				+ LTRIM(STR(@UI_SUM, 20, 2))						
+						+', @DEAL_TYPE: '			+ str(@DEAL_TYPE,len(@DEAL_TYPE),0)
+						+', @DEAL_CURRENCY_CODE: '	+ @DEAL_CURRENCY_CODE
+						+', @COLLECT_CURRENCY_CODE:'+ @COLLECT_CURRENCY_CODE
+					;
+			exec dbo.[SP_SYS_LOG_PROC] @@PROCID, @Sql, @Msg;
+			if @TRACE = 1 print( @Msg );			
+		END
 
 		SET @ACCUMULATED_TAX = DBO.TRANS_VAL_TO_VAL_TA(@ACCUMULATED_TAX, @COLLECT_CURRENCY_CODE, @DEAL_CURRENCY_CODE)
 
 		SELECT	@TEMP_RESULT  = SUM( dbo.FN_TAXES_CALCULATE_PREFFERENCE_TA( [ROW_ID], @UI_SUM, ISNULL(@ACCUMULATED_AMOUNT, 0), ISNULL(@ACCUMULATED_TAX, 0), @DEAL_CURRENCY_CODE) )
-			,	@TAX_CURRENCY = MIN( case when [TAX_CURRENCY] = 'X' then @DEAL_CURRENCY_CODE else [TAX_CURRENCY] end )
+			,	@TAX_CURRENCY = MIN( case when [TAX_CURRENCY] = @X_CCY then @DEAL_CURRENCY_CODE else [TAX_CURRENCY] end )
 		FROM @TAX_COMMISSIONS_TABLE
 
 	END
@@ -102,7 +135,7 @@ BEGIN
 		INSERT INTO @TAX_COMMISSIONS_TABLE
 			SELECT [ROW_ID], [COMMISSION_ORDER], [CURRENCY] FROM dbo.[TAXES_INFO_COMMISSION_TA] WITH(NOLOCK)
 			WHERE [TAX_CODE] = @TAX_CODE
-				AND [TYPE] = 'Tax'
+				AND [TYPE] = @TypeTax
 				AND [IS_DEFAULT_CURRENCY] = 0
 				AND [CURRENCY] = @DEAL_CURRENCY_CODE
 			ORDER BY [COMMISSION_ORDER]
@@ -111,11 +144,11 @@ BEGIN
 			INSERT INTO @TAX_COMMISSIONS_TABLE
 				SELECT [ROW_ID], [COMMISSION_ORDER], [CURRENCY] FROM dbo.[TAXES_INFO_COMMISSION_TA] WITH(NOLOCK)
 				WHERE [TAX_CODE] = @TAX_CODE
-					AND [TYPE] = 'Tax'
+					AND [TYPE]	 = @TypeTax
 					AND [IS_DEFAULT_CURRENCY] = 1
 				ORDER BY [COMMISSION_ORDER]
 
-		IF EXISTS (SELECT * FROM dbo.[TAXES_INFO_TA] WITH(NOLOCK) WHERE [ACUMULATIVE_TAX] > 0 AND [CODE] = @TAX_CODE AND [TYPE] = 'Tax')
+		IF EXISTS (SELECT * FROM dbo.[TAXES_INFO_TA] WITH(NOLOCK) WHERE [ACUMULATIVE_TAX] > 0 AND [CODE] = @TAX_CODE AND [TYPE] = @TypeTax)
 		BEGIN
 
 			SELECT 	@ACCUMULATED_AMOUNT = SUM(CONVERT(FLOAT, REPLACE([A].[UI_SUM], ' ', '')))
@@ -133,33 +166,31 @@ BEGIN
 		SET @ACCUMULATED_TAX = dbo.TRANS_VAL_TO_VAL_TA(@ACCUMULATED_TAX, @COLLECT_CURRENCY_CODE, @DEAL_CURRENCY_CODE)
 
 		SELECT	@TEMP_RESULT = SUM( dbo.FN_TAXES_CALCULATE_COMMISSION_TA( [ROW_ID], @UI_SUM, ISNULL(@ACCUMULATED_AMOUNT, 0), ISNULL(@ACCUMULATED_TAX, 0), @DEAL_CURRENCY_CODE) )
-			,	@TAX_CURRENCY = MIN(case when [TAX_CURRENCY] = 'X' then @DEAL_CURRENCY_CODE else [TAX_CURRENCY] end)
+			,	@TAX_CURRENCY = MIN(case when [TAX_CURRENCY] = @X_CCY then @DEAL_CURRENCY_CODE else [TAX_CURRENCY] end)
 		FROM @TAX_COMMISSIONS_TABLE
 
 	END
-
-	/* SET @TEMP_RESULT = DBO.TRANS_VAL_TO_VAL_TA(@TEMP_RESULT, @DEAL_CURRENCY_CODE, @TAX_CURRENCY) */
 
 	SELECT	@RESULT_SUM = LTRIM(STR(@TEMP_RESULT, 20, 2))
 		,	@RESULT_CCY = @TAX_CURRENCY
 	;
 
-	IF @TRACE = 1
+	IF @TRACE = 1 OR @RESULT_SUM IS NULL OR @RESULT_CCY IS NULL
 	BEGIN 
-		DECLARE @Msg varchar(2000) = 'Calculated tax amout: ' + @TAX_CURRENCY + ' ' + LTRIM(STR(@TEMP_RESULT, 20, 2)) 
-			+ ', @TA_TYPE: "'			+ @TA_TYPE
-			+'", @TAX_CODE: '			+ str(@TAX_CODE ,len(@TAX_CODE),0)
-			+'", @PREF_CODE: '			+ str(@PREF_CODE,len(@PREF_CODE),0)
-			+'", @DEAL_TYPE: '			+ str(@DEAL_TYPE,len(@DEAL_TYPE),0)
-			+'", @UI_SUM: '				+ LTRIM(STR(@TEMP_RESULT, 20, 2))
-			+'", @DEAL_CURRENCY_CODE: '	+ @DEAL_CURRENCY_CODE
-			+'", @ACCUMULATED_AMOUNT: '	+ LTRIM(STR(@ACCUMULATED_AMOUNT, 20, 2))
-			+'", @ACCUMULATED_TAX: '	+ LTRIM(STR(@ACCUMULATED_TAX, 20, 2))
-			+'", @COLLECT_CURRENCY_CODE: '+ @COLLECT_CURRENCY_CODE	
-			;
-
-		exec dbo.[SP_SYS_LOG_PROC] @@PROCID, N'', @Msg
-		PRINT( @Msg );
+		select	@Sql = str(@ROW_ID,len(@ROW_ID),0)
+			,	@Msg = N'Calculated tax amout: '+ IsNull(@TAX_CURRENCY,'null') +' ' + case when @TEMP_RESULT is null then 'null' else LTRIM(STR(@TEMP_RESULT, 20, 2)) end
+					+', @TA_TYPE: '				+ IsNull(@TA_TYPE,'null')
+					+', @TAX_CODE: '			+ IsNull(str(@TAX_CODE ,len(@TAX_CODE),0), 'null')
+					+', @PREF_CODE: '			+ IsNull(str(@PREF_CODE,len(@PREF_CODE),0), 'null')
+					+', @DEAL_TYPE: '			+ IsNull(str(@DEAL_TYPE,len(@DEAL_TYPE),0), 'null' )
+					+', @UI_SUM: '				+ LTRIM(STR(IsNull(@UI_SUM,-1), 20, 2))
+					+', @DEAL_CURRENCY_CODE: '	+ IsNull(@DEAL_CURRENCY_CODE, 'null')
+					+', @ACCUMULATED_AMOUNT: '	+ IsNull(LTRIM(STR(@ACCUMULATED_AMOUNT, 20, 2)), 'null')
+					+', @ACCUMULATED_TAX: '		+ IsNull(LTRIM(STR(@ACCUMULATED_TAX, 20, 2)), 'null')
+					+', @COLLECT_CURRENCY_CODE:'+ IsNull(@COLLECT_CURRENCY_CODE, 'null')
+		;
+		exec dbo.[SP_SYS_LOG_PROC] @@PROCID, @Sql, @Msg;
+		IF @TRACE = 1 PRINT( @Msg );
 	END
 
 	IF (@UPDATE_REGISTER = 1)
